@@ -30,7 +30,8 @@
 #define PBL_COLOR 1
 
 //#define TEST_MODE
-
+#define FALSE 0
+#define TRUE 1
 #define RECONNECT_KEY 0
 #define REQUEST_CALENDAR_KEY 1
 #define CLOCK_STYLE_KEY 2
@@ -49,6 +50,28 @@
 #define SETTINGS_KEY_DAY_NAME 202
 #define SETTINGS_KEY_MONTH_NAME 203
 #define SETTINGS_KEY_WEEK_NO 204
+
+#define REQUEST_REMINDERS_KEY 18              // v1.1
+#define REMINDERS_RESPONSE_KEY 19
+#define REMINDER_CHANGE_KEY 20
+#define REQUEST_REMINDER_LISTS_KEY 37         // v1.4
+#define REMINDER_LISTS_RESPONSE_KEY 38
+#define REMINDER_LIST_INDEX_KEY 39
+
+#define ALL_REMINDERS -1
+
+typedef struct {
+    uint8_t index;
+    char title[21];
+    bool completed;
+    bool has_due_date;
+    char due_date[19];
+} Reminder;
+
+typedef struct {
+    uint8_t index;
+    char title[21];
+} ReminderList;
 
 #define MAX_EVENTS 15
 #define ROT_MAX 5

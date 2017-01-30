@@ -2,6 +2,8 @@
 #include "pebble_fonts.h"
 #include "common.h"
 
+#define NO_EVENTS "No events."
+
 static Window *s_main_window;
 static TextLayer *s_time_layer;
 static TextLayer *s_line_layer;
@@ -10,13 +12,40 @@ static TextLayer *s_calendar_layer;
 static TextLayer *s_list_layer;
 static uint8_t battery_level = 113;
 static bool battery_plugged;
+static bool g_next = FALSE;
+static bool g_two_events = FALSE;
 static int8_t g_count = -1;
 static uint8_t g_received_rows = 0;
+static int8_t r_count = -1;
+static uint8_t r_received_rows = 0;
+static int8_t rl_count = -1;
+static uint8_t rl_received_rows = 0;
 static EVENT_TYPE g_event;
-
+static EVENT_TYPE g2_event;
 static void battery_state_handler(BatteryChargeState charge);
 static void main_window_load(Window *window);
 static void update_time_str();
+void log_message(DictionaryIterator *received);
+
+static void reminder_request() {
+    APP_LOG(APP_LOG_LEVEL_INFO, "reminder Request");
+    if (!bluetooth_connection_service_peek()) {
+      APP_LOG(APP_LOG_LEVEL_INFO, "No bluetooth");
+      return;
+    }
+    DictionaryIterator *iter;
+    app_message_outbox_begin(&iter);
+    if (!iter)
+      return;
+    r_count = -1;
+    r_received_rows = 0;
+    rl_count = -1;
+    rl_received_rows = 0;
+    dict_write_int8(iter, REQUEST_REMINDERS_KEY, -1);
+    dict_write_end(iter);
+    app_message_outbox_send();
+    APP_LOG(APP_LOG_LEVEL_INFO, "Reminder Messages sent, bt connected.");
+  }
 
 static void calendar_request() {
     APP_LOG(APP_LOG_LEVEL_INFO, "Calendar Request");
@@ -34,9 +63,105 @@ static void calendar_request() {
     dict_write_end(iter);
     g_count = -1;
     g_received_rows = 0;
+    g_two_events = FALSE;
+    g_next = FALSE;
     app_message_outbox_send();
     APP_LOG(APP_LOG_LEVEL_INFO, "Messages sent, bt connected.");
   }
+
+
+void received_message(DictionaryIterator *received, void *context) {
+  log_message(received);
+  static char r_buffer[256];
+  static char tr_buffer[256];
+  Tuple *tuple = dict_find(received, RECONNECT_KEY);
+  if (tuple) {
+    calendar_request();
+  }
+  
+   tuple = dict_find(received, REMINDERS_RESPONSE_KEY);
+
+  if (tuple) {
+    Reminder *r = (Reminder *)tuple->value;
+    next_reminder:
+    r_received_rows++;
+    if (r_count == -1) {
+      r = (Reminder *)&tuple->value->data[1];
+       APP_LOG(APP_LOG_LEVEL_INFO, "Reminder First %s %d", r->title, tuple->length);
+      r_count = tuple->value->data[0];
+      snprintf(r_buffer, sizeof(r_buffer), "%s", r->title);
+      if (tuple->length > (sizeof(Reminder)+1)) {
+        r = (Reminder *)&tuple->value->data[1+sizeof(Reminder)];
+       APP_LOG(APP_LOG_LEVEL_INFO, "Reminder First Second %s %d", r->title, tuple->length);
+        tuple->length = tuple->length -  (sizeof(Reminder)+1);
+        goto next_reminder;
+      }
+    } else {
+      next_reminder_2:
+       APP_LOG(APP_LOG_LEVEL_INFO, "Reminder 2 %s %d", r->title, tuple->length);
+       if (r_received_rows < 4) {
+         snprintf(tr_buffer, sizeof(tr_buffer), "%s", r_buffer);
+         snprintf(r_buffer, sizeof(r_buffer), "%s\n%s", tr_buffer, r->title);
+       } 
+      if (tuple->length > sizeof(Reminder)) {
+        r = (Reminder *)&tuple->value->data[0+sizeof(Reminder)];
+       APP_LOG(APP_LOG_LEVEL_INFO, "Reminder 2 second %s %d", r->title, tuple->length);
+        tuple->length = tuple->length - (sizeof(Reminder));
+        goto next_reminder_2;
+      }
+    }
+    text_layer_set_text(s_list_layer, r_buffer);
+   
+    APP_LOG(APP_LOG_LEVEL_INFO, "Reminders r %s", r_buffer);
+    APP_LOG(APP_LOG_LEVEL_INFO, "Reminders tr %s", tr_buffer);
+    return;
+  }
+  
+   tuple = dict_find(received, REMINDER_LISTS_RESPONSE_KEY);
+
+  if (tuple) {
+    ReminderList *r = (ReminderList *)tuple->value;
+    rl_received_rows++;
+    if (rl_count == -1) {
+      r = (ReminderList *)&tuple->value->data[1];
+      rl_count = tuple->value->data[0];
+      APP_LOG(APP_LOG_LEVEL_INFO, "ReminderList %d %s %d %d", r->index, r->title, rl_count, rl_received_rows);
+    } else {
+       APP_LOG(APP_LOG_LEVEL_INFO, "ReminderList %d %s", r->index, r->title, rl_count, rl_received_rows);
+       return;
+    }
+  }
+  
+  
+   // Gather the bits of a calendar together
+  tuple = dict_find(received, CALENDAR_RESPONSE_KEY);
+
+  if (tuple) {
+   
+    if (g_count == -1) {
+      g_count = tuple->value->data[0];
+      g_next = TRUE;
+      memcpy(&g_event, &tuple->value->data[1], sizeof(EVENT_TYPE));
+      APP_LOG(APP_LOG_LEVEL_INFO, "Gcount set to %d gettinf from offset 1", g_count);
+      update_time_str();
+      g_received_rows=1;
+    } else {
+       g_received_rows++;
+       APP_LOG(APP_LOG_LEVEL_INFO, "Next message %d %d %d", g_next, g_received_rows, g_count);
+       if (g_next == TRUE) {
+         g_next = FALSE;
+         g_two_events = TRUE;
+         memcpy(&g2_event, &tuple->value->data[0], sizeof(EVENT_TYPE));
+         APP_LOG(APP_LOG_LEVEL_INFO, "Next message annd two events %d %d", g_next, g_two_events);
+         update_time_str();
+       }
+    }
+    if (g_received_rows == g_count) {
+      reminder_request();
+    }
+  }
+  
+}
 
 static void update_time() {
   // Get a tm structure
@@ -90,7 +215,7 @@ static void battery_state_handler(BatteryChargeState charge) {
 static void main_window_unload(Window *window) {
   // Destroy TextLayer
   text_layer_destroy(s_time_layer);
-   text_layer_destroy(s_line_layer);
+  text_layer_destroy(s_line_layer);
 }
 
 void log_message(DictionaryIterator *received) {
@@ -106,22 +231,13 @@ void log_message(DictionaryIterator *received) {
         }while((tuple = dict_read_next(received)));
 }
   
-void custom_pulse() {
-static uint32_t const segments[] = { 200, 100, 400 };
-VibePattern pat = {
-  .durations = segments,
-  .num_segments = ARRAY_LENGTH(segments),
-};
-vibes_enqueue_custom_pattern(pat);
   
-}
-void update_time_str() {
-  time_t diff = g_event.start_date - time(NULL);
-  if (strlen(g_event.title) > 15) {
-    g_event.title[15]=0;
+int get_time_str(char *buffer, int buff_size, EVENT_TYPE *gevent) {
+  time_t diff = gevent->start_date - time(NULL);
+   APP_LOG(APP_LOG_LEVEL_INFO, "gevent %p diff %ld", gevent, diff);
+  if (strlen(gevent->title) > 13) {
+    gevent->title[13]=0;
   }
-  static char buffer[32];
-  int buff_size=sizeof(buffer);
   int days = diff / (3600 * 24);
   if (days > 0) {
     diff = diff - days * (3600 * 24);
@@ -131,57 +247,56 @@ void update_time_str() {
     diff = diff - hours * 3600;
   }
   int minutes = diff / 60;
-  if (days < 0 || days > 100 || minutes < 0 || minutes > 61 || hours < 0 || hours > 25) {
-    text_layer_set_text(s_calendar_layer, "No events.");
-    return;
+  if (days < 0 || days > 100 || minutes < -60 || minutes > 61 || hours < 0 || hours > 25) {
+    snprintf(buffer, buff_size, NO_EVENTS);
+    return -1;
+  }
+  if (hours == 0 && days == 0 && minutes < 6 && minutes > -1) {
+     vibes_long_pulse();
   }
   if (days > 0) {
-    snprintf(buffer, buff_size, "%dD%d:%s", days, hours, g_event.title);
+    snprintf(buffer, buff_size, "%dD%d:%s", days, hours, gevent->title);
   } else if (hours > 0) {
-    snprintf(buffer, buff_size, "%dH%d:%s", hours, minutes, g_event.title);
+    snprintf(buffer, buff_size, "%dH%d:%s", hours, minutes, gevent->title);
   } else {
-    snprintf(buffer, buff_size, "%dm:%s", minutes, g_event.title);    
+    snprintf(buffer, buff_size, "%dm:%s", minutes, gevent->title);    
   }
+  return minutes;
+}
+
+
+void update_time_str() {
+  static char buffer[63];
+  static char nbuffer[63];
+  static char fbuffer[64];
+  if (g_count == -1) {
+    return;
+  }
+  int buff_size=sizeof(buffer);
+  int minutes = get_time_str(buffer, buff_size, &g_event);
   text_layer_set_text(s_calendar_layer, buffer);
-  if (days == 0 && hours == 0 && minutes < 6) {
-    vibes_long_pulse();
-  }
-  // Do calendar request every 10 minutes
-  if (minutes % 10 == 0) {
-     calendar_request();
-  }
-
-}
-  
-void received_message(DictionaryIterator *received, void *context) {
- 
-  Tuple *tuple = dict_find(received, RECONNECT_KEY);
-  if (tuple) {
-    calendar_request();
-  }
-  
-   // Gather the bits of a calendar together
-  tuple = dict_find(received, CALENDAR_RESPONSE_KEY);
-
-  if (tuple) {
-   
-    if (g_count == -1) {
-      g_count = tuple->value->data[0];
-      memcpy(&g_event, &tuple->value->data[1], sizeof(EVENT_TYPE));
-      APP_LOG(APP_LOG_LEVEL_INFO, "Gcount set to %d gettinf from offset 1", g_count);
-      update_time_str();
-    } else {
-     
+  if (strncmp(buffer, NO_EVENTS, buff_size) != 0) {
+    if (g_two_events == TRUE) {
+      minutes = get_time_str(nbuffer, sizeof(nbuffer), &g2_event);
+      snprintf(fbuffer, sizeof(fbuffer), "%s\n%s", buffer, nbuffer);
+      APP_LOG(APP_LOG_LEVEL_INFO, "Fbuffer: %s", fbuffer);
+      text_layer_set_text(s_calendar_layer, fbuffer);
+      if (minutes % 10 == 0) {
+        calendar_request();
+      }
     }
-  }
-  
- // log_message(received);
+  }   
 }
+
 
 void out_failed_handler(DictionaryIterator *failed, AppMessageResult reason, void *context) {
   APP_LOG(APP_LOG_LEVEL_ERROR, "App Msg Send Fail %d", reason);
 }
 
+void accel_tap_handler(AccelAxisType axis, int32_t direction) {
+  APP_LOG(APP_LOG_LEVEL_INFO, "Tapped");
+}
+  
 static void init() {
   // Create main Window element and assign to pointer
   s_main_window = window_create();
@@ -201,7 +316,7 @@ static void init() {
   // Register with TickTimerService
   tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
   battery_state_service_subscribe(battery_state_handler);
-  
+  //accel_tap_service_subscribe(accel_tap_handler);
   const int inbound_size = app_message_inbox_size_maximum();
   const int outbound_size = app_message_outbox_size_maximum();
   app_message_open(inbound_size, outbound_size);
@@ -216,6 +331,7 @@ static void deinit() {
   tick_timer_service_unsubscribe();
   app_message_deregister_callbacks();
   battery_state_service_unsubscribe();
+  accel_tap_service_unsubscribe();
 }
 
 static void main_window_load(Window *window) {
@@ -227,18 +343,18 @@ static void main_window_load(Window *window) {
   // Time, Date, Battery and Bluetooth layers
   s_time_layer = get_layer(window_layer, 1,0,window_width,40,
     fonts_get_system_font(FONT_KEY_BITHAM_30_BLACK), GColorClear, GColorDarkCandyAppleRed);
-  s_date_layer = get_layer(window_layer, window_width/2+20,0,window_width,40,
+  s_date_layer = get_layer(window_layer, window_width/2+25,0,window_width,40,
     fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD), GColorClear, GColorBlack);
 
   //Calendar and List layers
-  s_calendar_layer = get_layer(window_layer, 0,38,window_width,20,
+  s_calendar_layer = get_layer(window_layer, 0,38,window_width,40,
     fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD), GColorOrange, GColorBlack);
  
-  s_list_layer = get_layer(window_layer, 0,58,window_width,bounds.size.h-58,
+  s_list_layer = get_layer(window_layer, 0,78,window_width,bounds.size.h-78,
     fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD), GColorYellow, GColorBlack);
   
   //Lines
-  get_layer(window_layer, window_width/2+16,3,1,34,
+  get_layer(window_layer, window_width/2+21,3,1,34,
     fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD), GColorBlack, GColorBlack);
   get_layer(window_layer, 0,38,window_width,2,
     fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD), GColorBlack, GColorBlack);
