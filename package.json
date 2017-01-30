@@ -1,0 +1,24 @@
+{
+    "author": "ProFace",
+    "dependencies": {},
+    "keywords": [],
+    "name": "proface",
+    "pebble": {
+        "displayName": "ProFace",
+        "enableMultiJS": false,
+        "messageKeys": [],
+        "projectType": "native",
+        "resources": {
+            "media": []
+        },
+        "sdkVersion": "3",
+        "targetPlatforms": [
+            "basalt"
+        ],
+        "uuid": "9538bece-9027-4f6f-81b1-a44620085992",
+        "watchapp": {
+            "watchface": true
+        }
+    },
+    "version": "1.0.0"
+}
